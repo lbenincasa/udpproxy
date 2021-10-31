@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"strings"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/jessevdk/go-flags"
+	"github.com/nats-io/nats.go"
+	log "github.com/sirupsen/logrus"
 )
 
 var opts struct {
@@ -55,6 +57,27 @@ func main() {
 	}
 
 	defer sourceConn.Close()
+
+	// Connect to a server
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		log.WithError(err).Fatal("Could not connect to nats server: ", nats.DefaultURL)
+		return
+	}
+
+	// Nats: Simple Sync Subscriber
+	sub, err := nc.SubscribeSync("foo")
+	if err != nil {
+		log.WithError(err).Fatal("Could not subscribe to foo")
+		return
+	}
+
+	//	m, err := sub.NextMsg(nats.DefaultTimeout)
+	msg, err := sub.NextMsg(nats.DefaultTimeout)
+	if err != nil || !bytes.Equal(msg.Data, []byte("omsg")) {
+		log.WithError(err).Fatal("Could not receive msg")
+		return
+	}
 
 	var targetConn []*net.UDPConn
 	for _, v := range targetAddr {
