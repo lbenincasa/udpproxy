@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/nats-io/nats.go"
@@ -15,6 +15,8 @@ var opts struct {
 	Source string   `long:"source" default:":2203" description:"Source port to listen on"`
 	Target []string `long:"target" description:"Target address to forward to"`
 	Quiet  bool     `long:"quiet" description:"whether to print logging info or not"`
+	Server bool     `long:"server" description:"server or client mode (only with nats)"`
+	Nats   bool     `long:"nats" description:"nats mode"`
 	Buffer int      `long:"buffer" default:"10240" description:"max buffer size for the socket io"`
 }
 
@@ -58,25 +60,26 @@ func main() {
 
 	defer sourceConn.Close()
 
-	// Connect to a server
-	nc, err := nats.Connect(nats.DefaultURL)
-	if err != nil {
-		log.WithError(err).Fatal("Could not connect to nats server: ", nats.DefaultURL)
-		return
-	}
+	var sub *nats.Subscription
+	var nc *nats.Conn
+	if opts.Nats {
+		// Connect to a server
+		nc, err = nats.Connect(nats.DefaultURL)
+		if err != nil {
+			log.WithError(err).Fatal("Could not connect to nats server: ", nats.DefaultURL)
+			return
+		}
+		log.Printf(">> Connection with nats server success (%v)", nats.DefaultURL)
+		defer nc.Close()
 
-	// Nats: Simple Sync Subscriber
-	sub, err := nc.SubscribeSync("foo")
-	if err != nil {
-		log.WithError(err).Fatal("Could not subscribe to foo")
-		return
-	}
-
-	//	m, err := sub.NextMsg(nats.DefaultTimeout)
-	msg, err := sub.NextMsg(nats.DefaultTimeout)
-	if err != nil || !bytes.Equal(msg.Data, []byte("omsg")) {
-		log.WithError(err).Fatal("Could not receive msg")
-		return
+		if opts.Server {
+			// Nats: Simple Sync Subscriber
+			sub, err = nc.SubscribeSync("udpproxy")
+			if err != nil {
+				log.WithError(err).Fatal("Could not subscribe to foo")
+				return
+			}
+		}
 	}
 
 	var targetConn []*net.UDPConn
@@ -93,19 +96,52 @@ func main() {
 
 	log.Printf(">> Starting udpproxy, Source at %v, Target at %v...", opts.Source, opts.Target)
 
+	b := make([]byte, opts.Buffer)
 	for {
-		b := make([]byte, opts.Buffer)
-		n, addr, err := sourceConn.ReadFromUDP(b)
+		if opts.Nats {
+			if opts.Server {
+				//	m, err := sub.NextMsg(nats.DefaultTimeout)
+				log.Printf(">> wait a msg from nats server...")
+				msg, err := sub.NextMsg(100 * time.Hour)
+				//			if err != nil || !bytes.Equal(msg.Data, []byte("omsg")) {
+				if err != nil {
+					log.WithError(err).Fatal("Could not receive msg")
+					continue
+				}
+				log.WithField("content", string(msg.Data)).Info("Packet received")
 
-		if err != nil {
-			log.WithError(err).Error("Could not receive a packet")
-			continue
-		}
+				for _, v := range targetConn {
+					if _, err := v.Write(msg.Data[0:]); err != nil {
+						log.WithError(err).Warn("Could not forward packet.")
+					}
+				}
+			} else {
+				n, addr, err := sourceConn.ReadFromUDP(b)
+				if err != nil {
+					log.WithError(err).Error("Could not receive a packet")
+					continue
+				}
+				log.WithField("addr", addr.String()).WithField("bytes", n).Info("Packet received")
 
-		log.WithField("addr", addr.String()).WithField("bytes", n).WithField("content", string(b)).Info("Packet received")
-		for _, v := range targetConn {
-			if _, err := v.Write(b[0:n]); err != nil {
-				log.WithError(err).Warn("Could not forward packet.")
+				err = nc.Publish("udpproxy", b[0:n])
+				if err != nil {
+					log.WithError(err).Error("Could not publish msg to nats!!")
+					continue
+				}
+			}
+
+		} else {
+			n, addr, err := sourceConn.ReadFromUDP(b)
+			if err != nil {
+				log.WithError(err).Error("Could not receive a packet")
+				continue
+			}
+			log.WithField("addr", addr.String()).WithField("bytes", n).WithField("content", string(b)).Info("Packet received")
+
+			for _, v := range targetConn {
+				if _, err := v.Write(b[0:n]); err != nil {
+					log.WithError(err).Warn("Could not forward packet.")
+				}
 			}
 		}
 	}
